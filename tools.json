@@ -1,0 +1,51 @@
+[
+  {
+    "name": "getTopStories",
+    "description": "Fetches the top stories from Hacker News",
+    "arguments": [
+      {
+        "name": "limit",
+        "type": "number",
+        "desc": "Number of top stories to fetch (default: 10)"
+      }
+    ]
+  },
+  {
+    "name": "getStoryComments",
+    "description": "Fetches comments for a specific story ID recursively",
+    "arguments": [
+      {
+        "name": "storyId",
+        "type": "number",
+        "desc": "The Hacker News story ID"
+      },
+      {
+        "name": "maxDepth",
+        "type": "number",
+        "desc": "Maximum depth of comments to fetch (default: 3)"
+      }
+    ]
+  },
+  {
+    "name": "getUser",
+    "description": "Fetches a user profile by username",
+    "arguments": [
+      {
+        "name": "username",
+        "type": "string",
+        "desc": "The Hacker News username"
+      }
+    ]
+  },
+  {
+    "name": "getStory",
+    "description": "Fetches a specific story by ID",
+    "arguments": [
+      {
+        "name": "storyId",
+        "type": "number",
+        "desc": "The Hacker News story ID"
+      }
+    ]
+  }
+]
