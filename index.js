@@ -8,72 +8,149 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import axios from 'axios';
 
-// Hacker News API base URL
+// Hacker News API base URLs
 const HN_API_BASE = 'https://hacker-news.firebaseio.com/v0';
+const ALGOLIA_API_BASE = 'http://hn.algolia.com/api/v1';
 
-// Hacker News API Functions
-async function getTopStories(limit = 10) {
+// Default values
+const DEFAULT_NUM_STORIES = 10;
+const DEFAULT_NUM_COMMENTS = 10;
+const DEFAULT_COMMENT_DEPTH = 2;
+
+// Helper Functions
+function validateCommentsIsListOfDicts(comments) {
+  return comments && comments.length > 0 && typeof comments[0] === 'object' && !Array.isArray(comments[0]);
+}
+
+async function getStoryInfo(storyId) {
   try {
-    const topIds = await axios.get(`${HN_API_BASE}/topstories.json`).then(r => r.data);
-    const stories = await Promise.all(
-      topIds.slice(0, limit).map(id =>
-        axios.get(`${HN_API_BASE}/item/${id}.json`).then(r => r.data)
-      )
-    );
-    return stories;
+    const response = await axios.get(`${ALGOLIA_API_BASE}/items/${storyId}`);
+    return response.data;
   } catch (error) {
-    throw new Error(`Failed to fetch top stories: ${error.message}`);
+    throw new Error(`Failed to fetch story info: ${error.message}`);
   }
 }
 
-async function getStoryComments(storyId, maxDepth = 3, currentDepth = 0) {
+function formatStoryDetails(story, basic = true) {
+  const output = {
+    id: story.story_id,
+    author: story.author,
+  };
+  
+  if (story.title) {
+    output.title = story.title;
+  }
+  if (story.points !== undefined) {
+    output.points = story.points;
+  }
+  if (story.url) {
+    output.url = story.url;
+  }
+  
+  if (!basic && story.children) {
+    if (!validateCommentsIsListOfDicts(story.children)) {
+      // Need to fetch full story info for comments
+      return null; // Will be handled by caller
+    }
+    output.comments = story.children.map(child => formatCommentDetails(child));
+  }
+  
+  return output;
+}
+
+function formatCommentDetails(comment, depth = DEFAULT_COMMENT_DEPTH, numComments = DEFAULT_NUM_COMMENTS) {
+  const output = {
+    author: comment.author,
+    text: comment.text,
+  };
+  
+  if (depth > 1 && comment.children && comment.children.length > 0) {
+    output.comments = comment.children
+      .slice(0, numComments)
+      .map(child => formatCommentDetails(child, depth - 1, numComments));
+  }
+  
+  return output;
+}
+
+// Main API Functions
+async function getStories(storyType, numStories = DEFAULT_NUM_STORIES) {
   try {
-    const story = await axios.get(`${HN_API_BASE}/item/${storyId}.json`).then(r => r.data);
+    const normalizedType = storyType.toLowerCase().trim();
+    const validTypes = ['top', 'new', 'ask_hn', 'show_hn'];
     
-    if (!story || !story.kids) {
-      return { story, comments: [] };
+    if (!validTypes.includes(normalizedType)) {
+      throw new Error('story_type must be one of: top, new, ask_hn, show_hn');
     }
 
-    const comments = [];
-    for (const commentId of story.kids.slice(0, 20)) { // Limit to first 20 comments
-      try {
-        const comment = await axios.get(`${HN_API_BASE}/item/${commentId}.json`).then(r => r.data);
-        if (comment && comment.type === 'comment') {
-          let replies = [];
-          if (currentDepth < maxDepth && comment.kids) {
-            replies = await getStoryComments(commentId, maxDepth, currentDepth + 1);
-          }
-          comments.push({
-            ...comment,
-            replies: replies.comments || []
-          });
-        }
-      } catch (error) {
-        console.warn(`Failed to fetch comment ${commentId}:`, error.message);
-      }
-    }
+    const apiParams = {
+      top: { endpoint: 'search', tags: 'front_page' },
+      new: { endpoint: 'search_by_date', tags: 'story' },
+      ask_hn: { endpoint: 'search', tags: 'ask_hn' },
+      show_hn: { endpoint: 'search', tags: 'show_hn' }
+    };
 
-    return { story, comments };
+    const params = apiParams[normalizedType];
+    const url = `${ALGOLIA_API_BASE}/${params.endpoint}?tags=${params.tags}&hitsPerPage=${numStories}`;
+    
+    const response = await axios.get(url);
+    return response.data.hits.map(story => formatStoryDetails(story));
   } catch (error) {
-    throw new Error(`Failed to fetch story comments: ${error.message}`);
+    throw new Error(`Failed to fetch stories: ${error.message}`);
   }
 }
 
-async function getUser(username) {
+async function searchStories(query, numResults = DEFAULT_NUM_STORIES, searchByDate = false) {
   try {
-    const user = await axios.get(`${HN_API_BASE}/user/${username}.json`).then(r => r.data);
-    return user;
+    const endpoint = searchByDate ? 'search_by_date' : 'search';
+    const url = `${ALGOLIA_API_BASE}/${endpoint}?query=${encodeURIComponent(query)}&hitsPerPage=${numResults}&tags=story`;
+    
+    const response = await axios.get(url);
+    return response.data.hits.map(story => formatStoryDetails(story));
   } catch (error) {
-    throw new Error(`Failed to fetch user ${username}: ${error.message}`);
+    throw new Error(`Failed to search stories: ${error.message}`);
   }
 }
 
-async function getStory(storyId) {
+async function getStoryInfoWithComments(storyId) {
   try {
-    const story = await axios.get(`${HN_API_BASE}/item/${storyId}.json`).then(r => r.data);
-    return story;
+    const story = await getStoryInfo(storyId);
+    const formatted = formatStoryDetails(story, false);
+    
+    if (formatted === null) {
+      // Need to fetch full story info for comments
+      const fullStory = await getStoryInfo(storyId);
+      return formatStoryDetails(fullStory, false);
+    }
+    
+    return formatted;
   } catch (error) {
-    throw new Error(`Failed to fetch story ${storyId}: ${error.message}`);
+    throw new Error(`Failed to get story info: ${error.message}`);
+  }
+}
+
+async function getUserStories(userName, numStories = DEFAULT_NUM_STORIES) {
+  try {
+    const url = `${ALGOLIA_API_BASE}/search?tags=author_${userName},story&hitsPerPage=${numStories}`;
+    const response = await axios.get(url);
+    return response.data.hits.map(story => formatStoryDetails(story));
+  } catch (error) {
+    throw new Error(`Failed to fetch user stories: ${error.message}`);
+  }
+}
+
+async function getUserInfo(userName, numStories = DEFAULT_NUM_STORIES) {
+  try {
+    const url = `${ALGOLIA_API_BASE}/users/${userName}`;
+    const response = await axios.get(url);
+    const userData = response.data;
+    
+    // Add user's stories
+    userData.stories = await getUserStories(userName, numStories);
+    
+    return userData;
+  } catch (error) {
+    throw new Error(`Failed to get user info: ${error.message}`);
   }
 }
 
@@ -95,64 +172,79 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: 'getTopStories',
-        description: 'Fetches the top stories from Hacker News',
+        name: 'get_stories',
+        description: 'Get stories from Hacker News. The options are `top`, `new`, `ask_hn`, `show_hn` for types of stories. This doesn\'t include the comments. Use `get_story_info` to get the comments.',
         inputSchema: {
           type: 'object',
           properties: {
-            limit: {
-              type: 'number',
-              description: 'Number of top stories to fetch (default: 10)',
-              default: 10
+            story_type: {
+              type: 'string',
+              description: 'Type of stories to get, one of: `top`, `new`, `ask_hn`, `show_hn`',
+              default: 'top'
+            },
+            num_stories: {
+              type: 'integer',
+              description: 'Number of stories to get',
+              default: DEFAULT_NUM_STORIES
             }
           }
         }
       },
       {
-        name: 'getStoryComments',
-        description: 'Fetches comments for a specific story ID recursively',
+        name: 'get_story_info',
+        description: 'Get detailed story info from Hacker News, including the comments',
         inputSchema: {
           type: 'object',
           properties: {
-            storyId: {
-              type: 'number',
-              description: 'The Hacker News story ID'
-            },
-            maxDepth: {
-              type: 'number',
-              description: 'Maximum depth of comments to fetch (default: 3)',
-              default: 3
+            story_id: {
+              type: 'integer',
+              description: 'Story ID'
             }
           },
-          required: ['storyId']
+          required: ['story_id']
         }
       },
       {
-        name: 'getUser',
-        description: 'Fetches a user profile by username',
+        name: 'search_stories',
+        description: 'Search stories from Hacker News. It is generally recommended to use simpler queries to get a broader set of results (less than 5 words). Very targeted queries may not return any results.',
         inputSchema: {
           type: 'object',
           properties: {
-            username: {
+            query: {
               type: 'string',
-              description: 'The Hacker News username'
+              description: 'Search query'
+            },
+            search_by_date: {
+              type: 'boolean',
+              description: 'Search by date, defaults to false. If this is false, then we search by relevance, then points, then number of comments.',
+              default: false
+            },
+            num_results: {
+              type: 'integer',
+              description: 'Number of results to get',
+              default: DEFAULT_NUM_STORIES
             }
           },
-          required: ['username']
+          required: ['query']
         }
       },
       {
-        name: 'getStory',
-        description: 'Fetches a specific story by ID',
+        name: 'get_user_info',
+        description: 'Get user info from Hacker News, including the stories they\'ve submitted',
         inputSchema: {
           type: 'object',
           properties: {
-            storyId: {
-              type: 'number',
-              description: 'The Hacker News story ID'
+            user_name: {
+              type: 'string',
+              description: 'Username of the user'
+            },
+            num_stories: {
+              type: 'integer',
+              description: `Number of stories to get, defaults to ${DEFAULT_NUM_STORIES}`,
+              default: DEFAULT_NUM_STORIES
             }
           },
-          required: ['storyId']
+          required: ['user_name']
         }
       }
     ]
@@ -166,26 +258,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
-      case 'getTopStories':
-        result = await getTopStories(args?.limit || 10);
+      case 'get_stories':
+        const storyType = args?.story_type || 'top';
+        const numStories = args?.num_stories || DEFAULT_NUM_STORIES;
+        result = await getStories(storyType, numStories);
         break;
-      case 'getStoryComments':
-        if (!args?.storyId) {
-          throw new Error('storyId is required for getStoryComments');
+      case 'get_story_info':
+        if (!args?.story_id) {
+          throw new Error('story_id is required for get_story_info');
         }
-        result = await getStoryComments(args.storyId, args?.maxDepth || 3);
+        result = await getStoryInfoWithComments(args.story_id);
         break;
-      case 'getUser':
-        if (!args?.username) {
-          throw new Error('username is required for getUser');
+      case 'search_stories':
+        if (!args?.query) {
+          throw new Error('query is required for search_stories');
         }
-        result = await getUser(args.username);
+        const query = args.query;
+        const searchByDate = args?.search_by_date || false;
+        const numResults = args?.num_results || DEFAULT_NUM_STORIES;
+        result = await searchStories(query, numResults, searchByDate);
         break;
-      case 'getStory':
-        if (!args?.storyId) {
-          throw new Error('storyId is required for getStory');
+      case 'get_user_info':
+        if (!args?.user_name) {
+          throw new Error('user_name is required for get_user_info');
         }
-        result = await getStory(args.storyId);
+        const userName = args.user_name;
+        const userNumStories = args?.num_stories || DEFAULT_NUM_STORIES;
+        result = await getUserInfo(userName, userNumStories);
         break;
       default:
         throw new Error(`Unknown tool: ${name}`);
